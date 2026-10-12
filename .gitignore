@@ -1,0 +1,19 @@
+# Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environment variables & secrets
+.env
+*.session
+*.session-journal
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
