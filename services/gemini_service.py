@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gemini-3.5-flash"
+DEFAULT_MODEL = "gemini-3.1-flash-lite"
 
 
 class GeminiService:
@@ -46,27 +46,30 @@ class GeminiService:
         # json blokni qidirish
         pattern = r"```json\s*(\{.*?\})\s*```"
         match = re.search(pattern, text, re.DOTALL)
+        clean_text = text
         if match:
             json_str = match.group(1)
             try:
                 extracted_data = json.loads(json_str)
-                # JSON blokni javobdan o'chirib tashlaymiz
                 clean_text = re.sub(pattern, "", text, flags=re.DOTALL).strip()
-                return clean_text, extracted_data
             except Exception:
                 pass
+        else:
+            inline_match = re.search(r"(\{[\"']first_name[\"'].*?\})", text, re.DOTALL)
+            if inline_match:
+                try:
+                    extracted_data = json.loads(inline_match.group(1))
+                    clean_text = text.replace(inline_match.group(1), "").strip()
+                except Exception:
+                    pass
 
-        # Agar oddiy qavsda bo'lsa
-        inline_match = re.search(r"(\{[\"']first_name[\"'].*?\})", text, re.DOTALL)
-        if inline_match:
-            try:
-                extracted_data = json.loads(inline_match.group(1))
-                clean_text = text.replace(inline_match.group(1), "").strip()
-                return clean_text, extracted_data
-            except Exception:
-                pass
+        # Faqat bo'sh bo'lmagan haqiqiy qiymatlarni qoldiramiz
+        valid_data = {}
+        for k, v in extracted_data.items():
+            if v is not None and v != "" and str(v).lower() not in ("null", "none"):
+                valid_data[k] = v
 
-        return text.strip(), extracted_data
+        return clean_text.strip(), valid_data
 
     def _generate_fallback_response(
         self,
@@ -173,16 +176,6 @@ class GeminiService:
         elif asked_for_last and words:
             if words[0].lower() not in NON_NAMES:
                 extracted["last_name"] = words[0].capitalize()
-        elif not extracted.get("first_name") and not extracted.get("phone") and not extracted.get("birth_year"):
-            if len(words) == 1 and words[0].lower() not in NON_NAMES:
-                if not current_data.get("first_name"):
-                    extracted["first_name"] = words[0].capitalize()
-                elif not current_data.get("last_name"):
-                    extracted["last_name"] = words[0].capitalize()
-            elif len(words) == 2 and all(w.lower() not in NON_NAMES for w in words):
-                extracted["first_name"] = words[0].capitalize()
-                extracted["last_name"] = words[1].capitalize()
-
         # Hozirgi holatni yangilaymiz
         merged = {**current_data, **extracted}
         first_name = merged.get("first_name")
@@ -201,18 +194,20 @@ class GeminiService:
 
         # Ma'lumotlarni ketma-ket so'rash
         if not first_name:
-            if any(w in msg_lower for w in ("salom", "assalomu", "qalesan", "qalaysan", "aloqa", "abuu", "privet")):
-                reply = "Assalomu alaykum! Xush kelibsiz. Ro'yxatdan o'tish uchun ismingizni ayta olasizmi?"
+            if any(w in msg_lower for w in ("salom", "assalomu", "qalesan", "qalaysan", "privet")):
+                reply = "Salom! Yaxshimisiz? Ro'yxatdan o'tasizmi?"
+            elif any(w in msg_lower for w in ("ha", "otaman", "o'taman", "mayli", "albatta")):
+                reply = "Ajoyib! Ismingiz nima?"
             else:
-                reply = "Ro'yxatdan o'tish uchun ismingizni ayta olasizmi?"
+                reply = "Siz ham ro'yxatdan o'tasizmi? Ismingiz nima?"
         elif not last_name:
-            reply = f"Rahmat, {first_name}! Familiyangizni ham yozib yuborsangiz."
+            reply = f"Rahmat, {first_name}! Familiyangiz nima?"
         elif not phone:
-            reply = f"Rahmat, {first_name} {last_name}! Bog'lanish uchun telefon raqamingizni qoldira olasizmi (masalan: +998901234567)?"
+            reply = "Telefon raqamingizni yozib yuborsangiz (+998...)"
         elif not birth_year:
-            reply = "Tug'ilgan yilingizni ham yozib yuborsangiz (masalan: 2002)?"
+            reply = "Tug'ilgan yilingiz nechanchi yil?"
         else:
-            reply = f"Rahmat, {first_name}! Barcha ma'lumotlaringiz ({first_name} {last_name}, {phone}, {birth_year}-yil) muvaffaqiyatli saqlandi ✅. Agar biror joyini o'zgartirmoqchi bo'lsangiz, bemalol yozishingiz mumkin!"
+            reply = f"Rahmat, {first_name}! Ma'lumotlaringiz saqlandi ✅"
 
         return reply, extracted
 
@@ -243,26 +238,33 @@ class GeminiService:
         )
 
         system_instruction = (
-            "Siz Telegramdagi juda xushmuomala, do'stona va aqlli yordamchisiz. "
-            "Sizning vazifangiz — foydalanuvchi bilan tabiiy suhbat qurgan holda undan quyidagi 4 ta ma'lumotni to'plash:\n"
-            "1. Ismi (first_name)\n"
-            "2. Familiyasi (last_name)\n"
-            "3. Telefon raqami (phone)\n"
-            "4. Tug'ilgan yili (birth_year)\n\n"
-            "QOIDALAR:\n"
-            "- Xabarni yaxshilab tahlil qiling va uning MAQSADINI tushuning!\n"
-            "- Salomlashuv so'zlarini ('salom', 'qalesan', 'qalaysiz', 'privet', 'aloqa') ism deb qabul qilmang! Alik olib, ismini so'rang.\n"
-            "- MA'LUMOTLARNI O'ZGARTIRISH (TAHRIRLASH):\n"
-            "  * Agar foydalanuvchi 'ismimni o'zgartirmoqchiman' desa, lekin yangi ismini aytmagan bo'lsa: 'o'zgartirmoqchiman' so'zini ism deb saqlamang! 'Albatta, yangi ismingiz nima?' deb so'rang.\n"
-            "  * Agar yangi ismini aytsa (masalan: 'ismim Abdurauf' yoki 'Ali deb yoz'), uni first_name ga oling va tasdiqlang.\n"
-            "  * Xuddi shunday familiya, telefon va tug'ilgan yil uchun ham: qiymat aniq aytilmaguncha hech qanday so'zni ma'lumot deb olmang!\n"
-            "- Yangi aniqlangan yoki o'zgartirilgan ma'lumotlarni FAQAT javobingiz oxirida JSON formatida ilova qiling:\n"
+            "Siz Telegramda foydalanuvchilarni ro'yxatga oluvchi jonli, samimiy va xushmuomala insondek suhbatlashuvchi yordamchisiz.\n\n"
+            "ASOSIY USLUB VA QOIDALAR:\n"
+            "1. ODAMGA O'XSHAB QISQA JAVOB BERING:\n"
+            "   - Hech qachon uzun, rasmiy yoki robotdek gapirmang! Javoblaringiz 1-2 ta qisqa gapdan oshmasin.\n"
+            "   - Telegramda oddiy insonlar qanday yozishsa, shunday do'stona va tabiiy javob bering.\n"
+            "   - Salomlashsa: alik olib, 'Yaxshimisiz? Ro'yxatdan o'tasizmi?' deb so'rang.\n"
+            "   - Savol bersa yoki umumiy gap yozsa: savoliga qisqa (1 gap) javob berib, 'Siz ham ro'yxatdan o'tasizmi?' deb taklif qiling.\n\n"
+            "2. MA'LUMOTLARNI BOSQICHMA-BOSQICH YIG'ISH:\n"
+            "   Foydalanuvchi 'Ha', 'o'taman', 'albatta' desa yoki ro'yxatdan o'tishga rozi bo'lsa, undan 4 ta ma'lumotni navbatma-navbat va juda qisqa so'rang:\n"
+            "   1) first_name — 'Ajoyib! Ismingiz nima?'\n"
+            "   2) last_name — 'Rahmat! Familiyangiz nima?'\n"
+            "   3) phone — 'Telefon raqamingizni yozib yuborsangiz (+998...)'\n"
+            "   4) birth_year — 'Tug'ilgan yilingiz nechanchi yil?'\n"
+            "   (Agar foydalanuvchi birdaniga bir nechta ma'lumot yozsa, ularni oling va yetishmayotganini so'rang).\n\n"
+            "3. ISM VA GAPLARNI AJRATISH (O'TA MUHIM):\n"
+            "   - Umumiy gaplar, savollar va fe'llar (masalan: 'salom', 'ha', 'barcha', 'tadbirda', 'buyruqlarni', 'qalesan') HECH QACHON ism emas!\n"
+            "   - Faqat foydalanuvchi aniq o'z ismini aytgandagina (masalan: 'Abdurauf', 'Ismim Ali') first_name deb oling.\n\n"
+            "4. MA'LUMOTLARNI O'ZGARTIRISH:\n"
+            "   - Agar foydalanuvchi 'ismimni o'zgartirmoqchiman' desa, yangi ismini so'rang.\n"
+            "   - Yangi qiymat aytilsa, uni yangilang.\n\n"
+            "5. NATIJANI JSON FORMATDA QAYTARISH:\n"
+            "   - Aniqlangan yoki yangilangan ma'lumotlarni FAQAT javobingiz oxirida ```json ... ``` blokida bering:\n"
             "```json\n"
-            "{\"first_name\": \"...\", \"last_name\": \"...\", \"phone\": \"...\", \"birth_year\": 2000}\n"
+            "{\"first_name\": \"...\"}\n"
             "```\n"
-            "(Faqat yangi/o'zgargan kalitlarni kiriting. Agar hech qanday yangi/o'zgargan ma'lumot bo'lmasa, json blok qo'shmang).\n"
-            "- Agar barcha 4 ta ma'lumot mavjud bo'lsa va foydalanuvchi o'zgartirish kiritmasa, do'stona suhbatlashing va agar xohlasa biror ma'lumotini o'zgartirishi mumkinligini eslatib o'ting.\n"
-            "- Doimo o'zbek tilida, do'stona va qisqa javob bering."
+            "   - Agar yangi ma'lumot bo'lmasa (masalan 'salom', 'ha', oddiy savol), JSON BLOKNI UMUMAN QO'SHMANG!\n"
+            "   - Hamma ma'lumot to'plangach: 'Rahmat! Ma'lumotlaringiz saqlandi ✅' deb qisqa tasdiqlang."
         )
 
         prompt_parts = []
@@ -271,12 +273,13 @@ class GeminiService:
         prompt_parts.append(f"user: {user_message}\n\n[Hozirgi ma'lumotlar: {known_status}]")
         full_prompt = "\n".join(prompt_parts)
 
-        # Turli modellarni sinab ko'rish ro'yxati (429 xatolik bo'lsa, zaxiradagilarga o'tadi)
+        # Ishchi va mavjud modellarni zaxira sifatida sinash
         candidate_models = [
             self.model_name,
-            "gemini-2.5-flash",
-            "gemini-2.0-flash",
-            "gemini-1.5-flash",
+            "gemini-3.1-flash-lite",
+            "gemini-flash-latest",
+            "gemini-3.5-flash-lite",
+            "gemini-3.8-flash",
         ]
         unique_models = []
         for m in candidate_models:
